@@ -58,8 +58,8 @@ startCommand:
       # General Config
       readOnlyMode:
         type: boolean
-        description: "(Optional) Run in read-only mode (prevents create/update/delete). Defaults to false."
-        default: false
+        description: "(Optional) Run in read-only mode (prevents create/update/delete). Defaults to true."
+        default: true
 
     additionalProperties: false # Disallow properties not defined above
 
@@ -91,7 +91,7 @@ startCommand:
         JIRA_PROJECTS_FILTER: config.jiraProjectsFilter,
 
         // General ENV VARS
-        READ_ONLY_MODE: config.readOnlyMode !== undefined ? String(config.readOnlyMode) : 'false',
+        READ_ONLY_MODE: config.readOnlyMode !== undefined ? String(config.readOnlyMode) : 'true', 
       };
 
       // Filter out undefined/null env variables
