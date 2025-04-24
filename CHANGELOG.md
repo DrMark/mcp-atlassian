@@ -2,6 +2,53 @@
 
 ## [Unreleased]
 
+## [0.8.3] - 2025-04-24
+
+### Removed
+- Removed Resources functionality to resolve excessive startup API requests (#303)
+
+## [0.8.2] - 2025-04-23
+
+### Fixed
+- Reverted the FastMCP v2 migration (commits `b434c1d`, `db5e7de`) to resolve critical errors introduced in v0.8.1, including issues with `jira_create_issue`, `get_issue`, `get_board_issues`, and `get_sprints_from_board`. This restores stability while the refactoring issues are investigated further. (Fixes #314, #315, #316, #318, #319)
+
+## [0.8.1] - 2025-04-23
+
+### Fixed
+- Fixed Jira search pagination parameter mismatch by correctly passing 'start' instead of 'start_at' parameter
+- Fixed Jira search result handling by updating issue extraction logic
+
+## [0.8.0] - 2025-04-22
+
+### Added
+- Added `jira_update_sprint`
+- Added `jira_search_fields` tool for fuzzy searching Jira fields
+
+### Changed
+- Migrated server architecture to FastMCP v2
+- Enabled setting transport mode (stdio/sse) via TRANSPORT env var
+- Added support for setting port number via PORT env var when using SSE transport
+- Implemented proper precedence: CLI arguments > environment variables > defaults
+- Enhanced startup with detailed connection feedback and sensitive data masking
+- Added optional parent_id parameter for Confluence page updates
+
+### Fixed
+- Fixed Jira Server/Data Center assignee field handling by prioritizing user name over key
+- Fixed issue with `jira_get_issue` and comments handling
+- Fixed duplicate functions and improved typing in Jira mixins
+
+### Other
+- Added Docker installation as primary method in README
+- Added version-specific tags for container images on ghcr.io
+- Added .dockerignore and updated Dockerfile for improved build process
+
+## [0.7.1] - 2025-04-18
+
+### Fixed
+- Fixed batch issue creation payload structure in `batch_create_issues` to correctly pass list directly to Jira API without double-wrapping in `issueUpdates` (#273).
+- Fixed `jira_get_issue` tool to include comments when comment_limit>0 by correcting field name check from "comments" to "comment" in JiraIssue.to_simplified_dict() (#281, #275).
+- Fixed AttributeError in `jira_get_epic_issues` tool when processing results (#280, #277).
+
 ## [0.7.0] - 2025-04-17
 
 ### Removed (Breaking Change)

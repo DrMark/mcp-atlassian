@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from mcp.server import Server
-from mcp.types import Resource, TextContent, Tool
-from pydantic import AnyUrl
+from mcp.types import TextContent, Tool
 
 from .confluence import ConfluenceFetcher
-from .confluence.utils import quote_cql_identifier_if_needed
+from .confluence.config import ConfluenceConfig
 from .jira import JiraFetcher
-from .jira.utils import escape_jql_string
+from .jira.config import JiraConfig
 from .utils.io import is_read_only_mode
+from .utils.logging import log_config_param
 from .utils.urls import is_atlassian_cloud_url
 
 # Configure logging
@@ -90,10 +90,6 @@ async def server_lifespan(server: Server) -> AsyncIterator[AppContext]:
     services = get_available_services()
 
     try:
-        # Initialize services
-        confluence = ConfluenceFetcher() if services["confluence"] else None
-        jira = JiraFetcher() if services["jira"] else None
-
         # Log the startup information
         logger.info("Starting MCP Atlassian server")
 
@@ -101,12 +97,92 @@ async def server_lifespan(server: Server) -> AsyncIterator[AppContext]:
         read_only = is_read_only_mode()
         logger.info(f"Read-only mode: {'ENABLED' if read_only else 'DISABLED'}")
 
-        if confluence:
-            confluence_url = confluence.config.url
-            logger.info(f"Confluence URL: {confluence_url}")
-        if jira:
-            jira_url = jira.config.url
-            logger.info(f"Jira URL: {jira_url}")
+        confluence = None
+        jira = None
+
+        # Initialize Confluence if configured
+        if services["confluence"]:
+            logger.info("Attempting to initialize Confluence client...")
+            try:
+                confluence_config = ConfluenceConfig.from_env()
+                log_config_param(logger, "Confluence", "URL", confluence_config.url)
+                log_config_param(
+                    logger, "Confluence", "Auth Type", confluence_config.auth_type
+                )
+                if confluence_config.auth_type == "basic":
+                    log_config_param(
+                        logger, "Confluence", "Username", confluence_config.username
+                    )
+                    log_config_param(
+                        logger,
+                        "Confluence",
+                        "API Token",
+                        confluence_config.api_token,
+                        sensitive=True,
+                    )
+                else:
+                    log_config_param(
+                        logger,
+                        "Confluence",
+                        "Personal Token",
+                        confluence_config.personal_token,
+                        sensitive=True,
+                    )
+                log_config_param(
+                    logger,
+                    "Confluence",
+                    "SSL Verify",
+                    str(confluence_config.ssl_verify),
+                )
+                log_config_param(
+                    logger,
+                    "Confluence",
+                    "Spaces Filter",
+                    confluence_config.spaces_filter,
+                )
+
+                confluence = ConfluenceFetcher(config=confluence_config)
+                logger.info("Confluence client initialized successfully.")
+            except Exception as e:
+                logger.error(
+                    f"Failed to initialize Confluence client: {e}", exc_info=True
+                )
+
+        # Initialize Jira if configured
+        if services["jira"]:
+            logger.info("Attempting to initialize Jira client...")
+            try:
+                jira_config = JiraConfig.from_env()
+                log_config_param(logger, "Jira", "URL", jira_config.url)
+                log_config_param(logger, "Jira", "Auth Type", jira_config.auth_type)
+                if jira_config.auth_type == "basic":
+                    log_config_param(logger, "Jira", "Username", jira_config.username)
+                    log_config_param(
+                        logger,
+                        "Jira",
+                        "API Token",
+                        jira_config.api_token,
+                        sensitive=True,
+                    )
+                else:
+                    log_config_param(
+                        logger,
+                        "Jira",
+                        "Personal Token",
+                        jira_config.personal_token,
+                        sensitive=True,
+                    )
+                log_config_param(
+                    logger, "Jira", "SSL Verify", str(jira_config.ssl_verify)
+                )
+                log_config_param(
+                    logger, "Jira", "Projects Filter", jira_config.projects_filter
+                )
+
+                jira = JiraFetcher(config=jira_config)
+                logger.info("Jira client initialized successfully.")
+            except Exception as e:
+                logger.error(f"Failed to initialize Jira client: {e}", exc_info=True)
 
         # Provide context to the application
         yield AppContext(confluence=confluence, jira=jira)
@@ -117,202 +193,6 @@ async def server_lifespan(server: Server) -> AsyncIterator[AppContext]:
 
 # Create server instance
 app = Server("mcp-atlassian", lifespan=server_lifespan)
-
-
-# Implement server handlers
-@app.list_resources()
-async def list_resources() -> list[Resource]:
-    """List Confluence spaces and Jira projects the user is actively interacting with."""
-    resources = []
-
-    ctx = app.request_context.lifespan_context
-
-    # Add Confluence spaces the user has contributed to
-    if ctx and ctx.confluence:
-        try:
-            # Get spaces the user has contributed to
-            spaces = ctx.confluence.get_user_contributed_spaces(limit=250)
-
-            # Add spaces to resources
-            resources.extend(
-                [
-                    Resource(
-                        uri=f"confluence://{space['key']}",
-                        name=f"Confluence Space: {space['name']}",
-                        mimeType="text/plain",
-                        description=(
-                            f"A Confluence space containing documentation and knowledge base articles. "
-                            f"Space Key: {space['key']}. "
-                            f"{space.get('description', '')} "
-                            f"Access content using: confluence://{space['key']}/pages/PAGE_TITLE"
-                        ).strip(),
-                    )
-                    for space in spaces.values()
-                ]
-            )
-        except Exception as e:
-            logger.error(f"Error fetching Confluence spaces: {str(e)}")
-
-    # Add Jira projects the user is involved with
-    if ctx and ctx.jira:
-        try:
-            # Get current user's account ID
-            account_id = ctx.jira.get_current_user_account_id()
-
-            # Escape the account ID for safe JQL insertion
-            escaped_account_id = escape_jql_string(account_id)
-
-            # Use JQL to find issues the user is assigned to or reported, using the escaped ID
-            # Note: We use the escaped_account_id directly, as it already includes the necessary quotes.
-            jql = f"assignee = {escaped_account_id} OR reporter = {escaped_account_id} ORDER BY updated DESC"
-            logger.debug(f"Executing JQL for list_resources: {jql}")
-            issues = ctx.jira.jira.jql(jql, limit=250, fields=["project"])
-
-            # Extract and deduplicate projects
-            projects = {}
-            for issue in issues.get("issues", []):
-                project = issue.get("fields", {}).get("project", {})
-                project_key = project.get("key")
-                if project_key and project_key not in projects:
-                    projects[project_key] = {
-                        "key": project_key,
-                        "name": project.get("name", project_key),
-                        "description": project.get("description", ""),
-                    }
-
-            # Add projects to resources
-            resources.extend(
-                [
-                    Resource(
-                        uri=f"jira://{project['key']}",
-                        name=f"Jira Project: {project['name']}",
-                        mimeType="text/plain",
-                        description=(
-                            f"A Jira project tracking issues and tasks. Project Key: {project['key']}. "
-                        ).strip(),
-                    )
-                    for project in projects.values()
-                ]
-            )
-        except Exception as e:
-            logger.error(f"Error fetching Jira projects: {e}", exc_info=True)
-
-    return resources
-
-
-@app.read_resource()
-async def read_resource(uri: AnyUrl) -> str:
-    """Read content from Confluence based on the resource URI."""
-
-    # Get application context
-    ctx = app.request_context.lifespan_context
-
-    # Handle Confluence resources
-    if str(uri).startswith("confluence://"):
-        if not ctx or not ctx.confluence:
-            raise ValueError(
-                "Confluence is not configured. Please provide Confluence credentials."
-            )
-        parts = str(uri).replace("confluence://", "").split("/")
-
-        # Handle space listing
-        if len(parts) == 1:
-            space_key = parts[0]
-
-            # Apply the fix here - properly quote the space key
-            quoted_space_key = quote_cql_identifier_if_needed(space_key)
-
-            # Use CQL to find recently updated pages in this space
-            cql = f"space = {quoted_space_key} AND contributor = currentUser() ORDER BY lastmodified DESC"
-            pages = ctx.confluence.search(cql=cql, limit=20)
-
-            if not pages:
-                # Fallback to regular space pages if no user-contributed pages found
-                pages = ctx.confluence.get_space_pages(space_key, limit=10)
-
-            content = []
-            for page in pages:
-                page_dict = page.to_simplified_dict()
-                title = page_dict.get("title", "Untitled")
-                url = page_dict.get("url", "")
-
-                content.append(f"# [{title}]({url})\n\n{page.page_content}\n\n---")
-
-            return "\n\n".join(content)
-
-        # Handle specific page
-        elif len(parts) >= 3 and parts[1] == "pages":
-            space_key = parts[0]
-            title = parts[2]
-            page = ctx.confluence.get_page_by_title(space_key, title)
-
-            if not page:
-                raise ValueError(f"Page not found: {title}")
-
-            return page.page_content
-
-    # Handle Jira resources
-    elif str(uri).startswith("jira://"):
-        if not ctx or not ctx.jira:
-            raise ValueError("Jira is not configured. Please provide Jira credentials.")
-        parts = str(uri).replace("jira://", "").split("/")
-
-        # Handle project listing
-        if len(parts) == 1:
-            project_key = parts[0]
-
-            # Get current user's account ID
-            account_id = ctx.jira.get_current_user_account_id()
-
-            # Use JQL to find issues in this project that the user is involved with
-            jql = f"project = {project_key} AND (assignee = {account_id} OR reporter = {account_id}) ORDER BY updated DESC"
-            issues = ctx.jira.search_issues(jql=jql, limit=20)
-
-            if not issues:
-                # Fallback to recent issues if no user-related issues found
-                issues = ctx.jira.get_project_issues(project_key, limit=10)
-
-            content = []
-            for issue in issues:
-                issue_dict = issue.to_simplified_dict()
-                key = issue_dict.get("key", "")
-                summary = issue_dict.get("summary", "Untitled")
-                url = issue_dict.get("url", "")
-                status = issue_dict.get("status", {})
-                status_name = status.get("name", "Unknown") if status else "Unknown"
-
-                # Create a markdown representation of the issue
-                issue_content = (
-                    f"# [{key}: {summary}]({url})\nStatus: {status_name}\n\n"
-                )
-                if issue_dict.get("description"):
-                    issue_content += f"{issue_dict.get('description')}\n\n"
-
-                content.append(f"{issue_content}---")
-
-            return "\n\n".join(content)
-
-        # Handle specific issue
-        elif len(parts) >= 2:
-            issue_key = parts[1] if len(parts) > 1 else parts[0]
-            issue = ctx.jira.get_issue(issue_key)
-
-            if not issue:
-                raise ValueError(f"Issue not found: {issue_key}")
-
-            issue_dict = issue.to_simplified_dict()
-            markdown = f"# {issue_dict.get('key')}: {issue_dict.get('summary')}\n\n"
-
-            if issue_dict.get("status"):
-                status_name = issue_dict.get("status", {}).get("name", "Unknown")
-                markdown += f"**Status:** {status_name}\n\n"
-
-            if issue_dict.get("description"):
-                markdown += f"{issue_dict.get('description')}\n\n"
-
-            return markdown
-
-    raise ValueError(f"Invalid resource URI: {uri}")
 
 
 @app.list_tools()
@@ -520,6 +400,10 @@ async def list_tools() -> list[Tool]:
                                     "description": "Optional comment for this version",
                                     "default": "",
                                 },
+                                "parent_id": {
+                                    "type": "string",
+                                    "description": "Optional the new parent page ID",
+                                },
                             },
                             "required": ["page_id", "title", "content"],
                         },
@@ -639,6 +523,32 @@ async def list_tools() -> list[Tool]:
                             },
                         },
                         "required": ["jql"],
+                    },
+                ),
+                Tool(
+                    name="jira_search_fields",
+                    description="Search Jira fields by keyword with fuzzy match",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "keyword": {
+                                "type": "string",
+                                "description": "Keyword for fuzzy search. If left empty, lists the first 'limit' available fields in their default order.",
+                                "default": "",
+                            },
+                            "limit": {
+                                "type": "number",
+                                "description": "Maximum number of results",
+                                "default": 10,
+                                "minimum": 1,
+                            },
+                            "refresh": {
+                                "type": "boolean",
+                                "description": "Whether to force refresh the field list",
+                                "default": False,
+                            },
+                        },
+                        "required": [],
                     },
                 ),
                 Tool(
@@ -884,6 +794,40 @@ async def list_tools() -> list[Tool]:
                                 "default": 10,
                                 "minimum": 1,
                                 "maximum": 50,
+                            },
+                        },
+                        "required": ["sprint_id"],
+                    },
+                ),
+                Tool(
+                    name="jira_update_sprint",
+                    description="Update jira sprint",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "sprint_id": {
+                                "type": "string",
+                                "description": "The id of sprint (e.g., '10001')",
+                            },
+                            "sprint_name": {
+                                "type": "string",
+                                "description": "Optional: New name for the sprint",
+                            },
+                            "state": {
+                                "type": "string",
+                                "description": "Optional: New state for the sprint (future|active|closed)",
+                            },
+                            "start_date": {
+                                "type": "string",
+                                "description": "Optional: New start date for the sprint",
+                            },
+                            "end_date": {
+                                "type": "string",
+                                "description": "Optional: New end date for the sprint",
+                            },
+                            "goal": {
+                                "type": "string",
+                                "description": "Optional: New goal for the sprint",
                             },
                         },
                         "required": ["sprint_id"],
@@ -1450,6 +1394,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             content = arguments.get("content")
             is_minor_edit = arguments.get("is_minor_edit", False)
             version_comment = arguments.get("version_comment", "")
+            parent_id = arguments.get("parent_id")
 
             if not page_id or not title or not content:
                 raise ValueError(
@@ -1464,6 +1409,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 is_minor_edit=is_minor_edit,
                 version_comment=version_comment,
                 is_markdown=True,
+                parent_id=parent_id,
             )
 
             # Format results
@@ -1601,6 +1547,22 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 )
             ]
 
+        elif name == "jira_search_fields" and ctx and ctx.jira:
+            if not ctx or not ctx.jira:
+                raise ValueError("Jira is not configured.")
+
+            keyword = arguments.get("keyword")
+            limit = int(arguments.get("limit", 10))
+
+            result = ctx.jira.search_fields(keyword, limit)
+
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(result, indent=2, ensure_ascii=False),
+                )
+            ]
+
         elif name == "jira_get_project_issues" and ctx and ctx.jira:
             if not ctx or not ctx.jira:
                 raise ValueError("Jira is not configured.")
@@ -1644,14 +1606,14 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 epic_key, start=start_at, limit=limit
             )
 
-            # Format results
-            issues = [issue.to_simplified_dict() for issue in search_result.issues]
+            # Format results - iterate directly over the list
+            issues = [issue.to_simplified_dict() for issue in search_result]
 
             # Include metadata in the response
             response = {
-                "total": search_result.total,
-                "start_at": search_result.start_at,
-                "max_results": search_result.max_results,
+                "total": len(search_result),
+                "start_at": start_at,
+                "max_results": limit,
                 "issues": issues,
             }
 
@@ -1854,6 +1816,48 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 TextContent(
                     type="text",
                     text=json.dumps(response, indent=2, ensure_ascii=False),
+                )
+            ]
+
+        elif name == "jira_update_sprint" and ctx and ctx.jira:
+            if not ctx or not ctx.jira:
+                raise ValueError("Jira is not configured.")
+
+            sprint_id = arguments.get("sprint_id")
+            sprint_name = arguments.get("sprint_name")
+            goal = arguments.get("goal")
+            start_date = arguments.get("start_date")
+            end_date = arguments.get("end_date")
+            state = arguments.get("state")
+
+            sprint = ctx.jira.update_sprint(
+                sprint_id=sprint_id,
+                sprint_name=sprint_name,
+                goal=goal,
+                start_date=start_date,
+                end_date=end_date,
+                state=state,
+            )
+
+            if sprint is None:
+                # Handle the error case, e.g., return an error message
+                error_payload = {
+                    "error": f"Failed to update sprint {sprint_id}. Check logs for details."
+                }
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(error_payload, indent=2, ensure_ascii=False),
+                    )
+                ]
+
+            # If sprint is not None, proceed as before
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        sprint.to_simplified_dict(), indent=2, ensure_ascii=False
+                    ),
                 )
             ]
 

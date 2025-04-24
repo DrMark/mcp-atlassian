@@ -3,8 +3,8 @@
 ![PyPI Version](https://img.shields.io/pypi/v/mcp-atlassian)
 ![PyPI - Downloads](https://img.shields.io/pypi/dm/mcp-atlassian)
 ![PePy - Total Downloads](https://static.pepy.tech/personalized-badge/mcp-atlassian?period=total&units=international_system&left_color=grey&right_color=blue&left_text=Total%20Downloads)
+[![Run Tests](https://github.com/sooperset/mcp-atlassian/actions/workflows/tests.yml/badge.svg)](https://github.com/sooperset/mcp-atlassian/actions/workflows/tests.yml)
 ![License](https://img.shields.io/github/license/sooperset/mcp-atlassian)
-[![smithery badge](https://smithery.ai/badge/mcp-atlassian)](https://smithery.ai/server/mcp-atlassian)
 
 Model Context Protocol (MCP) server for Atlassian products (Confluence and Jira). This integration supports both Confluence & Jira Cloud and Server/Data Center deployments.
 
@@ -56,56 +56,19 @@ First, generate the necessary authentication tokens for Confluence & Jira:
 
 ### 2. Installation
 
-The primary way to use MCP Atlassian is through IDE integration:
-
-**Option 1: Using uvx (Recommended)**
-
-Install uv first:
-
-**macOS/Linux:**
+MCP Atlassian is distributed as a Docker image. This is the recommended way to run the server, especially for IDE integration. Ensure you have Docker installed.
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Pull Pre-built Image
+docker pull ghcr.io/sooperset/mcp-atlassian:latest
 ```
-
-**Windows:**
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-With `uv` installed, you can use `uvx mcp-atlassian` directly in your IDE configuration without installing the package separately.
-
-**Option 2: Using pip**
-
-```bash
-pip install mcp-atlassian
-```
-
-**Option 3: Using Smithery**
-
-```bash
-npx -y @smithery/cli install mcp-atlassian --client claude
-```
-
-### 3. Key Configuration Options
-
-When configuring in your IDE, you can use these optional environment variables:
-
-- `CONFLUENCE_SPACES_FILTER`: Filter by space keys (e.g., "DEV,TEAM,DOC")
-- `JIRA_PROJECTS_FILTER`: Filter by project keys (e.g., "PROJ,DEV,SUPPORT")
-- `READ_ONLY_MODE`: Set to "true" to disable write operations
-- `MCP_VERBOSE`: Set to "true" for more detailed logging
-
-> **Note:** You can configure just Confluence, just Jira, or both services by including only the variables for the services you need.
-
-See the [.env.example](https://github.com/sooperset/mcp-atlassian/blob/main/.env.example) file for all available options.
 
 ## IDE Integration
 
 MCP Atlassian is designed to be used with AI assistants through IDE integration.
 
-> **Note**: To apply the configuration in Claude Desktop:
+> [!TIP]
+> **To apply the configuration in Claude Desktop:**
 >
 > **Method 1 (Recommended)**: Click hamburger menu (☰) > Settings > Developer > "Edit Config" button
 >
@@ -116,23 +79,50 @@ MCP Atlassian is designed to be used with AI assistants through IDE integration.
 >
 > **For Cursor**: Open Settings → Features → MCP Servers → + Add new global MCP server
 
-Here's how to set it up based on your installation method:
+### Configuration Methods
 
-### Using uvx (Recommended)
+There are two main approaches to configure the Docker container:
 
+1. **Passing Variables Directly** (shown in examples below)
+2. **Using an Environment File** with `--env-file` flag (shown in collapsible sections)
+
+> [!NOTE]
+> Common environment variables include:
+>
+> - `CONFLUENCE_SPACES_FILTER`: Filter by space keys (e.g., "DEV,TEAM,DOC")
+> - `JIRA_PROJECTS_FILTER`: Filter by project keys (e.g., "PROJ,DEV,SUPPORT")
+> - `READ_ONLY_MODE`: Set to "true" to disable write operations
+> - `MCP_VERBOSE`: Set to "true" for more detailed logging
+>
+> See the [.env.example](https://github.com/sooperset/mcp-atlassian/blob/main/.env.example) file for all available options.
+
+### Configuration Examples
+
+**Method 1 (Passing Variables Directly):**
 ```json
 {
   "mcpServers": {
     "mcp-atlassian": {
-      "command": "uvx",
-      "args": ["mcp-atlassian"],
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e", "CONFLUENCE_URL",
+        "-e", "CONFLUENCE_USERNAME",
+        "-e", "CONFLUENCE_API_TOKEN",
+        "-e", "JIRA_URL",
+        "-e", "JIRA_USERNAME",
+        "-e", "JIRA_API_TOKEN",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ],
       "env": {
         "CONFLUENCE_URL": "https://your-company.atlassian.net/wiki",
         "CONFLUENCE_USERNAME": "your.email@company.com",
-        "CONFLUENCE_API_TOKEN": "your_api_token",
+        "CONFLUENCE_API_TOKEN": "your_confluence_api_token",
         "JIRA_URL": "https://your-company.atlassian.net",
         "JIRA_USERNAME": "your.email@company.com",
-        "JIRA_API_TOKEN": "your_api_token"
+        "JIRA_API_TOKEN": "your_jira_api_token"
       }
     }
   }
@@ -140,38 +130,85 @@ Here's how to set it up based on your installation method:
 ```
 
 <details>
-<summary>Server/Data Center Configuration</summary>
-
-For Server/Data Center deployments, use these environment variables instead:
+<summary>Alternative: Using Environment File</summary>
 
 ```json
 {
   "mcpServers": {
     "mcp-atlassian": {
-      "command": "uvx",
-      "args": ["mcp-atlassian"],
-      "env": {
-        "CONFLUENCE_URL": "https://confluence.your-company.com",
-        "CONFLUENCE_PERSONAL_TOKEN": "your_token",
-        "JIRA_URL": "https://jira.your-company.com",
-        "JIRA_PERSONAL_TOKEN": "your_token"
-      }
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--env-file",
+        "/path/to/your/mcp-atlassian.env",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ]
     }
   }
 }
 ```
 </details>
 
-<details> <summary>Single Service Configurations</summary>
+<details>
+<summary>Server/Data Center Configuration</summary>
 
-For Confluence only:
+For Server/Data Center deployments, use direct variable passing:
 
 ```json
 {
   "mcpServers": {
     "mcp-atlassian": {
-      "command": "uvx",
-      "args": ["mcp-atlassian"],
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-e", "CONFLUENCE_URL",
+        "-e", "CONFLUENCE_PERSONAL_TOKEN",
+        "-e", "CONFLUENCE_SSL_VERIFY",
+        "-e", "JIRA_URL",
+        "-e", "JIRA_PERSONAL_TOKEN",
+        "-e", "JIRA_SSL_VERIFY",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ],
+      "env": {
+        "CONFLUENCE_URL": "https://confluence.your-company.com",
+        "CONFLUENCE_PERSONAL_TOKEN": "your_confluence_pat",
+        "CONFLUENCE_SSL_VERIFY": "false",
+        "JIRA_URL": "https://jira.your-company.com",
+        "JIRA_PERSONAL_TOKEN": "your_jira_pat",
+        "JIRA_SSL_VERIFY": "false"
+      }
+    }
+  }
+}
+```
+
+> [!NOTE]
+> Set `CONFLUENCE_SSL_VERIFY` and `JIRA_SSL_VERIFY` to "false" only if you have self-signed certificates.
+
+</details>
+
+<details> <summary>Single Service Configurations</summary>
+
+**For Confluence Cloud only:**
+
+```json
+{
+  "mcpServers": {
+    "mcp-atlassian": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-e", "CONFLUENCE_URL",
+        "-e", "CONFLUENCE_USERNAME",
+        "-e", "CONFLUENCE_API_TOKEN",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ],
       "env": {
         "CONFLUENCE_URL": "https://your-company.atlassian.net/wiki",
         "CONFLUENCE_USERNAME": "your.email@company.com",
@@ -182,63 +219,46 @@ For Confluence only:
 }
 ```
 
-For Jira only:
-
+For Confluence Server/DC, use:
 ```json
 {
   "mcpServers": {
     "mcp-atlassian": {
-      "command": "uvx",
-      "args": ["mcp-atlassian"],
-      "env": {
-        "JIRA_URL": "https://your-company.atlassian.net",
-        "JIRA_USERNAME": "your.email@company.com",
-        "JIRA_API_TOKEN": "your_api_token"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details> <summary>Alternative: Using CLI Arguments</summary>
-
-You can also use command-line arguments instead of environment variables:
-
-```json
-{
-  "mcpServers": {
-    "mcp-atlassian": {
-      "command": "uvx",
+      "command": "docker",
       "args": [
-        "mcp-atlassian",
-        "--confluence-url=https://your-company.atlassian.net/wiki",
-        "--confluence-username=your.email@company.com",
-        "--confluence-token=your_api_token",
-        "--jira-url=https://your-company.atlassian.net",
-        "--jira-username=your.email@company.com",
-        "--jira-token=your_api_token"
-      ]
+        "run",
+        "--rm",
+        "-i",
+        "-e", "CONFLUENCE_URL",
+        "-e", "CONFLUENCE_PERSONAL_TOKEN",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ],
+      "env": {
+        "CONFLUENCE_URL": "https://confluence.your-company.com",
+        "CONFLUENCE_PERSONAL_TOKEN": "your_personal_token"
+      }
     }
   }
 }
 ```
-</details>
 
-<details> <summary>Using pip</summary>
-
-If you've installed mcp-atlassian with pip, use this configuration instead:
+**For Jira Cloud only:**
 
 ```json
 {
   "mcpServers": {
     "mcp-atlassian": {
-      "command": "mcp-atlassian",
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-e", "JIRA_URL",
+        "-e", "JIRA_USERNAME",
+        "-e", "JIRA_API_TOKEN",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ],
       "env": {
-        "CONFLUENCE_URL": "https://your-company.atlassian.net/wiki",
-        "CONFLUENCE_USERNAME": "your.email@company.com",
-        "CONFLUENCE_API_TOKEN": "your_api_token",
         "JIRA_URL": "https://your-company.atlassian.net",
         "JIRA_USERNAME": "your.email@company.com",
         "JIRA_API_TOKEN": "your_api_token"
@@ -247,45 +267,59 @@ If you've installed mcp-atlassian with pip, use this configuration instead:
   }
 }
 ```
+
+For Jira Server/DC, use:
+```json
+{
+  "mcpServers": {
+    "mcp-atlassian": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-e", "JIRA_URL",
+        "-e", "JIRA_PERSONAL_TOKEN",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ],
+      "env": {
+        "JIRA_URL": "https://jira.your-company.com",
+        "JIRA_PERSONAL_TOKEN": "your_personal_token"
+      }
+    }
+  }
+}
+```
+
 </details>
 
 ### SSE Transport Configuration
 
 <details> <summary>Using SSE Instead of stdio</summary>
 
-1. Start the server with:
+1.  Start the server manually in a terminal:
 
-```bash
-uvx mcp-atlassian --transport sse --port 9000 \
-  --confluence-url https://your-company.atlassian.net/wiki \
-  --confluence-username your.email@company.com \
-  --confluence-token your_api_token \
-  --jira-url https://your-company.atlassian.net \
-  --jira-username your.email@company.com \
-  --jira-token your_api_token
-```
+    ```bash
+    docker run --rm -p 9000:9000 \
+      --env-file /path/to/your/.env \
+      ghcr.io/sooperset/mcp-atlassian:latest \
+      --transport sse --port 9000 -vv
+    ```
 
-2. Configure in your IDE:
+2.  Configure your IDE to connect to the running server via its URL:
 
-```json
-{
-  "mcpServers": {
-    "mcp-atlassian-sse": {
-      "url": "http://localhost:9000/sse"
+    ```json
+    {
+      "mcpServers": {
+        "mcp-atlassian-sse": {
+          "url": "http://localhost:9000/sse"
+        }
+      }
     }
-  }
-}
-```
+    ```
 </details>
 
-## Resources and Tools
-
-### Resources
-
-- `confluence://{space_key}`: Access Confluence spaces
-- `jira://{project_key}`: Access Jira projects
-
-> **Note:** The MCP server filters resources to only show Confluence spaces and Jira projects that the user is actively interacting with, based on their contributions and assignments.
+## Tools
 
 ### Key Tools
 
@@ -328,6 +362,7 @@ uvx mcp-atlassian --transport sse --port 9000 \
 ||`jira_get_board_issues`|
 ||`jira_get_sprints_from_board`|
 ||`jira_get_sprint_issues`|
+||`jira_update_sprint`|
 ||`jira_create_issue_link`|
 ||`jira_remove_issue_link`|
 
@@ -370,13 +405,8 @@ type %APPDATA%\Claude\logs\mcp*.log | more
 
 We welcome contributions to MCP Atlassian! If you'd like to contribute:
 
-1. Check out our [CONTRIBUTING.md](CONTRIBUTING.md) guide
-2. Set up your development environment:
-   ```bash
-   uv sync --frozen --all-extras --dev
-   pre-commit install
-   ```
-3. Make changes and submit a pull request
+1. Check out our [CONTRIBUTING.md](CONTRIBUTING.md) guide for detailed development setup instructions.
+2. Make changes and submit a pull request.
 
 We use pre-commit hooks for code quality and follow semantic versioning for releases.
 

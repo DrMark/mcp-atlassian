@@ -50,7 +50,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.assert_called_once_with(
             "TEST-123",
             expand=None,
-            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment",
+            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype",
             properties=None,
             update_history=True,
         )
@@ -68,20 +68,6 @@ class TestIssuesMixin:
 
     def test_get_issue_with_comments(self, issues_mixin):
         """Test get_issue with comments."""
-        # Mock the issue data
-        issue_data = {
-            "id": "12345",
-            "key": "TEST-123",
-            "fields": {
-                "summary": "Test Issue",
-                "description": "Test Description",
-                "status": {"name": "Open"},
-                "issuetype": {"name": "Bug"},
-                "created": "2023-01-01T00:00:00.000+0000",
-                "updated": "2023-01-02T00:00:00.000+0000",
-            },
-        }
-
         # Mock the comments data
         comments_data = {
             "comments": [
@@ -95,12 +81,30 @@ class TestIssuesMixin:
             ]
         }
 
+        # Mock the issue data
+        issue_data = {
+            "id": "12345",
+            "key": "TEST-123",
+            "fields": {
+                "comment": comments_data,
+                "summary": "Test Issue",
+                "description": "Test Description",
+                "status": {"name": "Open"},
+                "issuetype": {"name": "Bug"},
+                "created": "2023-01-01T00:00:00.000+0000",
+                "updated": "2023-01-02T00:00:00.000+0000",
+            },
+        }
+
         # Set up the mocked responses
         issues_mixin.jira.get_issue.return_value = issue_data
         issues_mixin.jira.issue_get_comments.return_value = comments_data
 
         # Call the method
-        issue = issues_mixin.get_issue("TEST-123")
+        issue = issues_mixin.get_issue(
+            "TEST-123",
+            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment",
+        )
 
         # Verify the API calls
         issues_mixin.jira.get_issue.assert_called_once_with(
@@ -179,7 +183,7 @@ class TestIssuesMixin:
             issues_mixin.jira.get_issue.assert_any_call(
                 "TEST-123",
                 expand=None,
-                fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment",
+                fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype",
                 properties=None,
                 update_history=True,
             )
@@ -889,7 +893,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.assert_called_with(
             "TEST-123",
             expand=None,
-            fields="summary,customfield_10049,comment",
+            fields="summary,customfield_10049",
             properties=None,
             update_history=True,
         )
@@ -910,7 +914,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.assert_called_with(
             "TEST-123",
             expand=None,
-            fields="summary,customfield_10050,comment",
+            fields="summary,customfield_10050",
             properties=None,
             update_history=True,
         )
@@ -959,7 +963,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.assert_called_with(
             "TEST-123",
             expand=None,
-            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment,properties",
+            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,properties",
             properties="property1,property2",
             update_history=True,
         )
@@ -972,7 +976,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.assert_called_with(
             "TEST-123",
             expand=None,
-            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment,properties",
+            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,properties",
             properties="property1,property2",
             update_history=True,
         )
@@ -993,7 +997,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.assert_called_with(
             "TEST-123",
             expand=None,
-            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,comment",
+            fields="summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype",
             properties=None,
             update_history=False,
         )
@@ -1052,9 +1056,9 @@ class TestIssuesMixin:
         # Verify bulk create was called correctly
         issues_mixin.jira.create_issues.assert_called_once()
         call_args = issues_mixin.jira.create_issues.call_args[0][0]
-        assert len(call_args["issueUpdates"]) == 2
-        assert call_args["issueUpdates"][0]["fields"]["summary"] == "Test Issue 1"
-        assert call_args["issueUpdates"][1]["fields"]["summary"] == "Test Issue 2"
+        assert len(call_args) == 2
+        assert call_args[0]["fields"]["summary"] == "Test Issue 1"
+        assert call_args[1]["fields"]["summary"] == "Test Issue 2"
 
     def test_batch_create_issues_validate_only(self, issues_mixin):
         """Test batch_create_issues with validate_only=True."""
@@ -1185,7 +1189,8 @@ class TestIssuesMixin:
 
         # Verify components were properly formatted
         call_args = issues_mixin.jira.create_issues.call_args[0][0]
-        components = call_args["issueUpdates"][0]["fields"]["components"]
+        assert len(call_args) == 1
+        components = call_args[0]["fields"]["components"]
         assert len(components) == 2
         assert components[0]["name"] == "Frontend"
         assert components[1]["name"] == "Backend"
