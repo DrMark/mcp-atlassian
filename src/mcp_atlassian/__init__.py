@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import os
+import sys
 
 import click
 from dotenv import load_dotenv
 
 from .utils.logging import setup_logging
 
-__version__ = "0.8.3"
+__version__ = "0.10.2"
 
 # Initialize logging with appropriate level
 logging_level = logging.WARNING
@@ -27,6 +28,11 @@ logger = setup_logging(logging_level)
 )
 @click.option(
     "--env-file", type=click.Path(exists=True, dir_okay=False), help="Path to .env file"
+)
+@click.option(
+    "--oauth-setup",
+    is_flag=True,
+    help="Run OAuth 2.0 setup wizard for Atlassian Cloud",
 )
 @click.option(
     "--transport",
@@ -82,9 +88,34 @@ logger = setup_logging(logging_level)
     is_flag=True,
     help="Run in read-only mode (disables all write operations)",
 )
+@click.option(
+    "--enabled-tools",
+    help="Comma-separated list of tools to enable (enables all if not specified)",
+)
+@click.option(
+    "--oauth-client-id",
+    help="OAuth 2.0 client ID for Atlassian Cloud",
+)
+@click.option(
+    "--oauth-client-secret",
+    help="OAuth 2.0 client secret for Atlassian Cloud",
+)
+@click.option(
+    "--oauth-redirect-uri",
+    help="OAuth 2.0 redirect URI for Atlassian Cloud",
+)
+@click.option(
+    "--oauth-scope",
+    help="OAuth 2.0 scopes (space-separated) for Atlassian Cloud",
+)
+@click.option(
+    "--oauth-cloud-id",
+    help="Atlassian Cloud ID for OAuth 2.0 authentication",
+)
 def main(
     verbose: bool,
     env_file: str | None,
+    oauth_setup: bool,
     transport: str,
     port: int,
     confluence_url: str | None,
@@ -100,10 +131,20 @@ def main(
     jira_ssl_verify: bool,
     jira_projects_filter: str | None,
     read_only: bool = False,
+    enabled_tools: str | None = None,
+    oauth_client_id: str | None = None,
+    oauth_client_secret: str | None = None,
+    oauth_redirect_uri: str | None = None,
+    oauth_scope: str | None = None,
+    oauth_cloud_id: str | None = None,
 ) -> None:
     """MCP Atlassian Server - Jira and Confluence functionality for MCP
 
     Supports both Atlassian Cloud and Jira Server/Data Center deployments.
+    Authentication methods supported:
+    - Username and API token (Cloud)
+    - Personal Access Token (Server/Data Center)
+    - OAuth 2.0 (Cloud only)
     """
     # Configure logging based on verbosity
     logging_level = logging.WARNING
@@ -116,6 +157,11 @@ def main(
     global logger
     logger = setup_logging(logging_level)
 
+    def was_option_provided(ctx: click.Context, param_name: str) -> bool:
+        return (
+            ctx.get_parameter_source(param_name) != click.core.ParameterSource.DEFAULT
+        )
+
     # Load environment variables from file if specified, otherwise try default .env
     if env_file:
         logger.debug(f"Loading environment from file: {env_file}")
@@ -124,8 +170,21 @@ def main(
         logger.debug("Attempting to load environment from default .env file")
         load_dotenv()
 
+    # Handle the OAuth setup wizard if requested
+    if oauth_setup:
+        logger.info("Starting OAuth 2.0 setup wizard")
+        # Import the oauth_authorize module functionality
+        try:
+            from .utils.oauth_setup import run_oauth_setup
+
+            sys.exit(run_oauth_setup())
+        except ImportError:
+            logger.error(
+                "Failed to import OAuth setup module. Make sure you have the required dependencies installed."
+            )
+            sys.exit(1)
+
     # Check environment variables if CLI options were not used (or kept default)
-    # CLI arguments take precedence over environment variables
 
     # Determine final transport mode
     final_transport = transport
@@ -152,6 +211,14 @@ def main(
                 f"Using port '{final_port}' from command line argument for SSE transport."
             )
 
+    # Handle enabled tools from CLI or environment
+    if enabled_tools:
+        os.environ["ENABLED_TOOLS"] = enabled_tools
+    elif os.getenv("ENABLED_TOOLS"):
+        logger.debug("Using enabled tools from environment variable")
+    else:
+        logger.debug("No tool filtering specified, all tools will be enabled")
+
     # Set environment variables from command line arguments if provided
     if confluence_url:
         os.environ["CONFLUENCE_URL"] = confluence_url
@@ -170,31 +237,59 @@ def main(
     if jira_personal_token:
         os.environ["JIRA_PERSONAL_TOKEN"] = jira_personal_token
 
+    # Set OAuth configuration if provided
+    if oauth_client_id:
+        os.environ["ATLASSIAN_OAUTH_CLIENT_ID"] = oauth_client_id
+    if oauth_client_secret:
+        os.environ["ATLASSIAN_OAUTH_CLIENT_SECRET"] = oauth_client_secret
+    if oauth_redirect_uri:
+        os.environ["ATLASSIAN_OAUTH_REDIRECT_URI"] = oauth_redirect_uri
+    if oauth_scope:
+        os.environ["ATLASSIAN_OAUTH_SCOPE"] = oauth_scope
+    if oauth_cloud_id:
+        os.environ["ATLASSIAN_OAUTH_CLOUD_ID"] = oauth_cloud_id
+
     # Set read-only mode from CLI flag
     if read_only:
         os.environ["READ_ONLY_MODE"] = "true"
 
-    # Set SSL verification for Confluence Server/Data Center
-    os.environ["CONFLUENCE_SSL_VERIFY"] = str(confluence_ssl_verify).lower()
+    # Get the current click context to check parameter sources
+    click_ctx = click.get_current_context()
+
+    # Set SSL verification for Confluence Server/Data Center, respecting env if CLI flag is default
+    if was_option_provided(click_ctx, "confluence_ssl_verify"):
+        os.environ["CONFLUENCE_SSL_VERIFY"] = str(confluence_ssl_verify).lower()
+    # else: environment variable (if set) will be used by ConfluenceConfig.from_env()
 
     # Set spaces filter for Confluence
     if confluence_spaces_filter:
         os.environ["CONFLUENCE_SPACES_FILTER"] = confluence_spaces_filter
 
-    # Set SSL verification for Jira Server/Data Center
-    os.environ["JIRA_SSL_VERIFY"] = str(jira_ssl_verify).lower()
+    # Set SSL verification for Jira Server/Data Center, respecting env if CLI flag is default
+    if was_option_provided(click_ctx, "jira_ssl_verify"):
+        os.environ["JIRA_SSL_VERIFY"] = str(jira_ssl_verify).lower()
+    # else: environment variable (if set) will be used by JiraConfig.from_env()
 
     # Set projects filter for Jira
     if jira_projects_filter:
         os.environ["JIRA_PROJECTS_FILTER"] = jira_projects_filter
 
-    from . import server
+    from .servers import main_mcp
 
     # Run the server with specified transport
-    asyncio.run(server.run_server(transport=final_transport, port=final_port))
+    if final_transport == "sse":
+        asyncio.run(
+            main_mcp.run_async(
+                transport=final_transport,
+                host="0.0.0.0",  # noqa: S104
+                port=final_port,
+            )
+        )
+    else:
+        asyncio.run(main_mcp.run_async(transport=final_transport))
 
 
-__all__ = ["main", "server", "__version__"]
+__all__ = ["main", "__version__"]
 
 if __name__ == "__main__":
     main()

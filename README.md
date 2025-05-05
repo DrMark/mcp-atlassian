@@ -40,19 +40,51 @@ https://github.com/user-attachments/assets/7fe9c488-ad0c-4876-9b54-120b666bb785
 
 ### 1. Authentication Setup
 
-First, generate the necessary authentication tokens for Confluence & Jira:
+MCP Atlassian supports three authentication methods:
 
-#### For Cloud
+#### A. API Token Authentication (Cloud)
 
 1. Go to https://id.atlassian.com/manage-profile/security/api-tokens
 2. Click **Create API token**, name it
 3. Copy the token immediately
 
-#### For Server/Data Center
+#### B. Personal Access Token (Server/Data Center)
 
 1. Go to your profile (avatar) → **Profile** → **Personal Access Tokens**
 2. Click **Create token**, name it, set expiry
 3. Copy the token immediately
+
+#### C. OAuth 2.0 Authentication (Cloud only)
+
+1. Create an OAuth 2.0 integration in Atlassian:
+   - Go to https://developer.atlassian.com/console/myapps/
+   - Click "Create" and select "OAuth 2.0 integration"
+   - Follow the wizard to create your app
+   - Configure permissions for both Jira and Confluence as needed
+   - Add a callback URL (e.g., http://localhost:8080/callback)
+
+2. Run the OAuth authorization helper:
+   ```bash
+   uvx mcp-atlassian@latest --oauth-setup
+   ```
+   This will guide you through the setup process by prompting for the required values (Client ID, Client Secret, etc.).
+
+   Alternatively, you can clone the repository and run the script directly:
+   ```bash
+   # Clone the repository if you haven't already
+   git clone https://github.com/sooperset/mcp-atlassian.git
+   cd mcp-atlassian
+
+   # Run the OAuth authorization script
+   python scripts/oauth_authorize.py \
+     --client-id YOUR_CLIENT_ID \
+     --client-secret YOUR_CLIENT_SECRET \
+     --redirect-uri "http://localhost:8080/callback" \
+     --scope "read:jira-work write:jira-work read:confluence-space.summary write:confluence-content"
+   ```
+
+3. Follow the browser prompt to authorize the application
+4. After successful authorization, add the displayed environment variables to your .env file
 
 ### 2. Installation
 
@@ -68,16 +100,12 @@ docker pull ghcr.io/sooperset/mcp-atlassian:latest
 MCP Atlassian is designed to be used with AI assistants through IDE integration.
 
 > [!TIP]
-> **To apply the configuration in Claude Desktop:**
->
-> **Method 1 (Recommended)**: Click hamburger menu (☰) > Settings > Developer > "Edit Config" button
->
-> **Method 2**: Locate and edit the configuration file directly:
+> **For Claude Desktop**: Locate and edit the configuration file directly:
 > - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 > - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 > - **Linux**: `~/.config/Claude/claude_desktop_config.json`
 >
-> **For Cursor**: Open Settings → Features → MCP Servers → + Add new global MCP server
+> **For Cursor**: Open Settings → MCP → + Add new global MCP server
 
 ### Configuration Methods
 
@@ -93,6 +121,7 @@ There are two main approaches to configure the Docker container:
 > - `JIRA_PROJECTS_FILTER`: Filter by project keys (e.g., "PROJ,DEV,SUPPORT")
 > - `READ_ONLY_MODE`: Set to "true" to disable write operations
 > - `MCP_VERBOSE`: Set to "true" for more detailed logging
+> - `ENABLED_TOOLS`: Comma-separated list of tool names to enable (e.g., "confluence_search,jira_get_issue")
 >
 > See the [.env.example](https://github.com/sooperset/mcp-atlassian/blob/main/.env.example) file for all available options.
 
@@ -188,6 +217,49 @@ For Server/Data Center deployments, use direct variable passing:
 
 > [!NOTE]
 > Set `CONFLUENCE_SSL_VERIFY` and `JIRA_SSL_VERIFY` to "false" only if you have self-signed certificates.
+
+</details>
+
+<details>
+<summary>OAuth 2.0 Authentication Configuration</summary>
+
+For Atlassian Cloud with OAuth 2.0:
+
+```json
+{
+  "mcpServers": {
+    "mcp-atlassian": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "-e", "CONFLUENCE_URL",
+        "-e", "JIRA_URL",
+        "-e", "ATLASSIAN_OAUTH_CLIENT_ID",
+        "-e", "ATLASSIAN_OAUTH_CLIENT_SECRET",
+        "-e", "ATLASSIAN_OAUTH_REDIRECT_URI",
+        "-e", "ATLASSIAN_OAUTH_SCOPE",
+        "-e", "ATLASSIAN_OAUTH_CLOUD_ID",
+        "ghcr.io/sooperset/mcp-atlassian:latest"
+      ],
+      "env": {
+        "CONFLUENCE_URL": "https://your-company.atlassian.net/wiki",
+        "JIRA_URL": "https://your-company.atlassian.net",
+        "ATLASSIAN_OAUTH_CLIENT_ID": "your_client_id",
+        "ATLASSIAN_OAUTH_CLIENT_SECRET": "your_client_secret",
+        "ATLASSIAN_OAUTH_REDIRECT_URI": "http://localhost:8080/callback",
+        "ATLASSIAN_OAUTH_SCOPE": "read:jira-work write:jira-work read:confluence-space.summary write:confluence-content",
+        "ATLASSIAN_OAUTH_CLOUD_ID": "your_cloud_id"
+      }
+    }
+  }
+}
+```
+
+> [!TIP]
+> Run the `scripts/oauth_authorize.py` script to get your access token and cloud ID.
+> OAuth 2.0 authentication takes precedence over other authentication methods if configured.
 
 </details>
 
@@ -341,32 +413,52 @@ For Jira Server/DC, use:
 
 <details> <summary>View All Tools</summary>
 
+*Tools marked with * are only available on Jira Cloud.*
+
 |Confluence Tools|Jira Tools|
 |---|---|
 |`confluence_search`|`jira_get_issue`|
 |`confluence_get_page`|`jira_search`|
 |`confluence_get_page_children`|`jira_get_project_issues`|
-|`confluence_get_page_ancestors`|`jira_get_epic_issues`|
 |`confluence_get_comments`|`jira_create_issue`|
 |`confluence_create_page`|`jira_batch_create_issues`|
 |`confluence_update_page`|`jira_update_issue`|
 |`confluence_delete_page`|`jira_delete_issue`|
-||`jira_get_transitions`|
-||`jira_transition_issue`|
+|`confluence_get_labels`|`jira_get_transitions`|
+|`confluence_add_label`|`jira_transition_issue`|
 ||`jira_add_comment`|
 ||`jira_add_worklog`|
 ||`jira_get_worklog`|
+||`jira_batch_get_changelogs`*|
 ||`jira_download_attachments`|
 ||`jira_link_to_epic`|
 ||`jira_get_agile_boards`|
 ||`jira_get_board_issues`|
 ||`jira_get_sprints_from_board`|
 ||`jira_get_sprint_issues`|
+||`jira_create_sprint`|
 ||`jira_update_sprint`|
+||`jira_get_issue_link_types`|
 ||`jira_create_issue_link`|
 ||`jira_remove_issue_link`|
 
 </details>
+
+### Tool Filtering and Access Control
+
+The server provides two ways to control tool access:
+
+1. **Tool Filtering**: Use `--enabled-tools` flag or `ENABLED_TOOLS` environment variable to specify which tools should be available:
+
+   ```bash
+   # Via environment variable
+   ENABLED_TOOLS="confluence_search,jira_get_issue,jira_search"
+
+   # Or via command line flag
+   docker run ... --enabled-tools "confluence_search,jira_get_issue,jira_search" ...
+   ```
+
+2. **Read/Write Control**: Tools are categorized as read or write operations. When `READ_ONLY_MODE` is enabled, only read operations are available regardless of `ENABLED_TOOLS` setting.
 
 ## Troubleshooting & Debugging
 

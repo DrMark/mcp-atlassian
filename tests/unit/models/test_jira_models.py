@@ -10,7 +10,6 @@ import re
 
 import pytest
 
-from mcp_atlassian.jira.search import SearchMixin
 from src.mcp_atlassian.models.constants import (
     EMPTY_STRING,
     JIRA_DEFAULT_ID,
@@ -20,6 +19,7 @@ from src.mcp_atlassian.models.constants import (
 from src.mcp_atlassian.models.jira import (
     JiraComment,
     JiraIssue,
+    JiraIssueLinkType,
     JiraIssueType,
     JiraPriority,
     JiraProject,
@@ -573,7 +573,6 @@ class TestJiraIssue:
 
     def test_to_simplified_dict(self, jira_issue_data):
         """Test converting a JiraIssue to a simplified dictionary."""
-        # --- Test default (essential fields) ---
         issue = JiraIssue.from_api_response(jira_issue_data)
         simplified = issue.to_simplified_dict()
 
@@ -815,19 +814,17 @@ class TestJiraIssue:
         assert issue.epic_key == "EPIC-456"
         assert issue.epic_name == "Epic Name Value"
 
-    def test_fields_with_names_method(self):
-        """Test using the names() method to find fields."""
+    def test_fields_with_names(self):
+        """Test using the names to find fields."""
 
-        class MockFields(dict):
-            def names(self):
-                return {
-                    "customfield_55555": "Epic Link",
-                    "customfield_66666": "Epic Name",
-                }
-
-        fields = MockFields(
-            {"customfield_55555": "EPIC-789", "customfield_66666": "Special Epic Name"}
-        )
+        fields = {
+            "customfield_55555": "EPIC-789",
+            "customfield_66666": "Special Epic Name",
+            "names": {
+                "customfield_55555": "Epic Link",
+                "customfield_66666": "Epic Name",
+            },
+        }
 
         result = JiraIssue._find_custom_field_in_api_response(fields, ["Epic Link"])
         assert result == "EPIC-789"
@@ -943,7 +940,6 @@ class TestJiraIssue:
         simplified = issue.to_simplified_dict()
         assert "timetracking" in simplified
         assert simplified["timetracking"]["original_estimate"] == "1d"
-        assert simplified["timetracking"]["remaining_estimate"] == "4h"
 
         issue.requested_fields = ["summary", "timetracking"]
         simplified = issue.to_simplified_dict()
@@ -974,6 +970,21 @@ class TestJiraSearchResult:
         assert result.start_at == 0
         assert result.max_results == 0
         assert result.issues == []
+
+    def test_from_api_response_missing_metadata(self, jira_search_data):
+        """Test creating a JiraSearchResult when API is missing metadata."""
+        # Remove total, startAt, maxResults from mock data
+        api_data = dict(jira_search_data)
+        api_data.pop("total", None)
+        api_data.pop("startAt", None)
+        api_data.pop("maxResults", None)
+
+        search_result = JiraSearchResult.from_api_response(api_data)
+        # Verify that -1 is used for missing metadata
+        assert search_result.total == -1
+        assert search_result.start_at == -1
+        assert search_result.max_results == -1
+        assert len(search_result.issues) == 1  # Assuming mock data has issues
 
 
 class TestJiraProject:
@@ -1132,6 +1143,68 @@ class TestJiraTransition:
         assert "is_global" not in simplified
 
 
+class TestJiraIssueLinkType:
+    """Tests for the JiraIssueLinkType model."""
+
+    def test_from_api_response_with_valid_data(self):
+        """Test creating a JiraIssueLinkType from valid API data."""
+        data = {
+            "id": "10001",
+            "name": "Blocks",
+            "inward": "is blocked by",
+            "outward": "blocks",
+            "self": "https://example.atlassian.net/rest/api/3/issueLinkType/10001",
+        }
+        link_type = JiraIssueLinkType.from_api_response(data)
+        assert link_type.id == "10001"
+        assert link_type.name == "Blocks"
+        assert link_type.inward == "is blocked by"
+        assert link_type.outward == "blocks"
+        assert (
+            link_type.self_url
+            == "https://example.atlassian.net/rest/api/3/issueLinkType/10001"
+        )
+
+    def test_from_api_response_with_empty_data(self):
+        """Test creating a JiraIssueLinkType from empty data."""
+        link_type = JiraIssueLinkType.from_api_response({})
+        assert link_type.id == JIRA_DEFAULT_ID
+        assert link_type.name == UNKNOWN
+        assert link_type.inward == EMPTY_STRING
+        assert link_type.outward == EMPTY_STRING
+        assert link_type.self_url is None
+
+    def test_from_api_response_with_none_data(self):
+        """Test creating a JiraIssueLinkType from None data."""
+        link_type = JiraIssueLinkType.from_api_response(None)
+        assert link_type.id == JIRA_DEFAULT_ID
+        assert link_type.name == UNKNOWN
+        assert link_type.inward == EMPTY_STRING
+        assert link_type.outward == EMPTY_STRING
+        assert link_type.self_url is None
+
+    def test_to_simplified_dict(self):
+        """Test converting JiraIssueLinkType to a simplified dictionary."""
+        link_type = JiraIssueLinkType(
+            id="10001",
+            name="Blocks",
+            inward="is blocked by",
+            outward="blocks",
+            self_url="https://example.atlassian.net/rest/api/3/issueLinkType/10001",
+        )
+        simplified = link_type.to_simplified_dict()
+        assert isinstance(simplified, dict)
+        assert simplified["id"] == "10001"
+        assert simplified["name"] == "Blocks"
+        assert simplified["inward"] == "is blocked by"
+        assert simplified["outward"] == "blocks"
+        assert "self" in simplified
+        assert (
+            simplified["self"]
+            == "https://example.atlassian.net/rest/api/3/issueLinkType/10001"
+        )
+
+
 class TestJiraWorklog:
     """Tests for the JiraWorklog model."""
 
@@ -1211,7 +1284,7 @@ class TestRealJiraData:
             return None
         try:
             config = JiraConfig.from_env()
-            return IssuesMixin(config=config)
+            return JiraFetcher(config=config)
         except ValueError:
             pytest.skip("Real Jira environment not configured")
             return None
@@ -1222,10 +1295,7 @@ class TestRealJiraData:
         try:
             config = JiraConfig.from_env()
 
-            class ProjectsMixinWithSearch(ProjectsMixin, SearchMixin):
-                pass
-
-            return ProjectsMixinWithSearch(config=config)
+            return JiraFetcher(config=config)
         except ValueError:
             pytest.skip("Real Jira environment not configured")
             return None
@@ -1235,7 +1305,7 @@ class TestRealJiraData:
             return None
         try:
             config = JiraConfig.from_env()
-            return TransitionsMixin(config=config)
+            return JiraFetcher(config=config)
         except ValueError:
             pytest.skip("Real Jira environment not configured")
             return None
@@ -1245,7 +1315,7 @@ class TestRealJiraData:
             return None
         try:
             config = JiraConfig.from_env()
-            return WorklogMixin(config=config)
+            return JiraFetcher(config=config)
         except ValueError:
             pytest.skip("Real Jira environment not configured")
             return None

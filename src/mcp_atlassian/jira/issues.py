@@ -1,19 +1,36 @@
 """Module for Jira issue operations."""
 
 import logging
+from collections import defaultdict
 from typing import Any
 
 from requests.exceptions import HTTPError
 
 from ..exceptions import MCPAtlassianAuthenticationError
 from ..models.jira import JiraIssue
-from .users import UsersMixin
-from .utils import parse_date_human_readable
+from ..models.jira.common import JiraChangelog
+from ..utils import parse_date
+from .client import JiraClient
+from .constants import DEFAULT_READ_JIRA_FIELDS
+from .protocols import (
+    AttachmentsOperationsProto,
+    EpicOperationsProto,
+    FieldsOperationsProto,
+    IssueOperationsProto,
+    UsersOperationsProto,
+)
 
 logger = logging.getLogger("mcp-jira")
 
 
-class IssuesMixin(UsersMixin):
+class IssuesMixin(
+    JiraClient,
+    AttachmentsOperationsProto,
+    EpicOperationsProto,
+    FieldsOperationsProto,
+    IssueOperationsProto,
+    UsersOperationsProto,
+):
     """Mixin for Jira issue operations."""
 
     def get_issue(
@@ -21,11 +38,7 @@ class IssuesMixin(UsersMixin):
         issue_key: str,
         expand: str | None = None,
         comment_limit: int | str | None = 10,
-        fields: str
-        | list[str]
-        | tuple[str, ...]
-        | set[str]
-        | None = "summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype",
+        fields: str | list[str] | tuple[str, ...] | set[str] | None = None,
         properties: str | list[str] | None = None,
         update_history: bool = True,
     ) -> JiraIssue:
@@ -48,14 +61,24 @@ class IssuesMixin(UsersMixin):
             Exception: If there is an error retrieving the issue
         """
         try:
+            # Determine fields_param: use provided fields or default from constant
+            fields_param = fields
+            if fields_param is None:
+                fields_param = ",".join(DEFAULT_READ_JIRA_FIELDS)
+            elif isinstance(fields_param, list | tuple | set):
+                fields_param = ",".join(fields_param)
+
             # Ensure necessary fields are included based on special parameters
             if (
-                isinstance(fields, str)
-                and fields
-                == "summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype"
+                fields_param == ",".join(DEFAULT_READ_JIRA_FIELDS)
+                or fields_param == "*all"
             ):
                 # Default fields are being used - preserve the order
-                default_fields_list = fields.split(",")
+                default_fields_list = (
+                    fields_param.split(",")
+                    if fields_param != "*all"
+                    else list(DEFAULT_READ_JIRA_FIELDS)
+                )
                 additional_fields = []
 
                 # Add appropriate fields based on expand parameter
@@ -84,16 +107,11 @@ class IssuesMixin(UsersMixin):
 
                 # Combine default fields with additional fields, preserving order
                 if additional_fields:
-                    fields = fields + "," + ",".join(additional_fields)
+                    fields_param = ",".join(default_fields_list + additional_fields)
             # Handle non-default fields string
 
             # Build expand parameter if provided
             expand_param = expand
-
-            # Convert fields to proper format if it's a list/tuple/set
-            fields_param = fields
-            if fields and isinstance(fields, list | tuple | set):
-                fields_param = ",".join(fields)
 
             # Convert properties to proper format if it's a list
             properties_param = properties
@@ -109,7 +127,14 @@ class IssuesMixin(UsersMixin):
                 update_history=update_history,
             )
             if not issue:
-                raise ValueError(f"Issue {issue_key} not found")
+                msg = f"Issue {issue_key} not found"
+                raise ValueError(msg)
+            if not isinstance(issue, dict):
+                msg = (
+                    f"Unexpected return value type from `jira.get_issue`: {type(issue)}"
+                )
+                logger.error(msg)
+                raise TypeError(msg)
 
             # Extract fields data, safely handling None
             fields_data = issue.get("fields", {}) or {}
@@ -134,7 +159,7 @@ class IssuesMixin(UsersMixin):
             if epic_info.get("epic_key"):
                 try:
                     # Get field IDs for epic fields
-                    field_ids = self.get_jira_field_ids()
+                    field_ids = self.get_field_ids_to_epic()
 
                     # Add epic link field if it doesn't exist
                     if (
@@ -175,7 +200,7 @@ class IssuesMixin(UsersMixin):
                 raise MCPAtlassianAuthenticationError(error_msg) from http_err
             else:
                 logger.error(f"HTTP error during API call: {http_err}", exc_info=False)
-                raise http_err
+                raise
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error retrieving issue {issue_key}: {error_msg}")
@@ -222,9 +247,13 @@ class IssuesMixin(UsersMixin):
         """
         if comment_limit is None or comment_limit > 0:
             try:
-                comments = self.jira.issue_get_comments(issue_key)
-                if isinstance(comments, dict) and "comments" in comments:
-                    comments = comments["comments"]
+                response = self.jira.issue_get_comments(issue_key)
+                if not isinstance(response, dict):
+                    msg = f"Unexpected return value type from `jira.issue_get_comments`: {type(response)}"
+                    logger.error(msg)
+                    raise TypeError(msg)
+
+                comments = response["comments"]
 
                 # Limit comments if needed
                 if comment_limit is not None:
@@ -260,7 +289,7 @@ class IssuesMixin(UsersMixin):
 
             # Get field IDs for epic fields
             try:
-                field_ids = self.get_jira_field_ids()
+                field_ids = self.get_field_ids_to_epic()
             except Exception as e:
                 logger.warning(f"Error getting Jira fields: {str(e)}")
                 field_ids = {}
@@ -290,6 +319,11 @@ class IssuesMixin(UsersMixin):
                             properties=None,
                             update_history=True,
                         )
+                        if not isinstance(epic, dict):
+                            msg = f"Unexpected return value type from `jira.get_issue`: {type(epic)}"
+                            logger.error(msg)
+                            raise TypeError(msg)
+
                         epic_fields = epic.get("fields", {}) or {}
 
                         # Get epic name using the discovered field ID
@@ -307,19 +341,6 @@ class IssuesMixin(UsersMixin):
             logger.warning(f"Error extracting epic information: {str(e)}")
 
         return epic_info
-
-    def _parse_date(self, date_str: str) -> str:
-        """
-        Parse a date string to a formatted date.
-
-        Args:
-            date_str: The date string to parse
-
-        Returns:
-            Formatted date string
-        """
-        # Use the common utility function for consistent formatting
-        return parse_date_human_readable(date_str)
 
     def _format_issue_content(
         self,
@@ -393,7 +414,7 @@ class IssuesMixin(UsersMixin):
                 if author_name and comment_body:
                     comment_date = comment.get("created", "")
                     if comment_date:
-                        comment_date = self._parse_date(comment_date)
+                        comment_date = parse_date(comment_date)
                         content.append(f"**{author_name}** ({comment_date}):")
                     else:
                         content.append(f"**{author_name}**:")
@@ -543,11 +564,15 @@ class IssuesMixin(UsersMixin):
             elif "parent" in kwargs:
                 self._prepare_parent_fields(fields, kwargs)
 
-            # Add custom fields
-            self._add_custom_fields(fields, kwargs)
+            # Process **kwargs using the dynamic field map
+            self._process_additional_fields(fields, kwargs_copy)
 
             # Create the issue
             response = self.jira.create_issue(fields=fields)
+            if not isinstance(response, dict):
+                msg = f"Unexpected return value type from `jira.create_issue`: {type(response)}"
+                logger.error(msg)
+                raise TypeError(msg)
 
             # Get the created issue key
             issue_key = response.get("key")
@@ -564,10 +589,7 @@ class IssuesMixin(UsersMixin):
                         f"Performing post-creation update for Epic {issue_key} with Epic-specific fields"
                     )
                     try:
-                        # Delegate to EpicsMixin.update_epic_fields
-                        from mcp_atlassian.jira.epics import EpicsMixin
-
-                        return EpicsMixin.update_epic_fields(self, issue_key, kwargs)
+                        return self.update_epic_fields(issue_key, kwargs)
                     except Exception as update_error:
                         logger.error(
                             f"Error during post-creation update of Epic {issue_key}: {str(update_error)}"
@@ -578,6 +600,10 @@ class IssuesMixin(UsersMixin):
 
             # Get the full issue data and convert to JiraIssue model
             issue_data = self.jira.get_issue(issue_key)
+            if not isinstance(issue_data, dict):
+                msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+                logger.error(msg)
+                raise TypeError(msg)
             return JiraIssue.from_api_response(issue_data)
 
         except Exception as e:
@@ -601,9 +627,7 @@ class IssuesMixin(UsersMixin):
         # Since JiraFetcher inherits from both IssuesMixin and EpicsMixin,
         # this will correctly use the prepare_epic_fields method from EpicsMixin
         # which implements the two-step Epic creation approach
-        from mcp_atlassian.jira.epics import EpicsMixin
-
-        EpicsMixin.prepare_epic_fields(self, fields, summary, kwargs)
+        self.prepare_epic_fields(fields, summary, kwargs)
 
     def _prepare_parent_fields(
         self, fields: dict[str, Any], kwargs: dict[str, Any]
@@ -648,56 +672,173 @@ class IssuesMixin(UsersMixin):
             # Server/DC might use name instead of accountId
             fields["assignee"] = {"name": assignee}
 
-    def _add_custom_fields(
+    def _process_additional_fields(
         self, fields: dict[str, Any], kwargs: dict[str, Any]
     ) -> None:
         """
-        Add custom fields to issue.
+        Processes keyword arguments to add standard or custom fields to the issue fields dictionary.
+        Uses the dynamic field map from FieldsMixin to identify field IDs.
 
         Args:
             fields: The fields dictionary to update
-            kwargs: Additional fields from the user
+            kwargs: Additional fields provided via **kwargs
         """
-        field_ids = self.get_jira_field_ids()
+        # Ensure field map is loaded/cached
+        field_map = (
+            self._generate_field_map()
+        )  # Ensure map is ready (method from FieldsMixin)
+        if not field_map:
+            logger.error(
+                "Could not generate field map. Cannot process additional fields."
+            )
+            return
 
         # Process each kwarg
-        for key, value in kwargs.items():
-            # Handle fixVersions specifically as it's a standard field often required
-            if key.lower() == "fixversions":
-                fields["fixVersions"] = value
-                logger.debug("Added fixVersions from additional_fields: %s", value)
-                continue  # Handled fixVersions
+        # Iterate over a copy to allow modification of the original kwargs if needed elsewhere
+        for key, value in kwargs.copy().items():
+            # Skip keys used internally for epic/parent handling or explicitly handled args like assignee/components
+            if key.startswith("__epic_") or key in ("parent", "assignee", "components"):
+                continue
 
-            # Explicitly handle components field
-            if key.lower() == "components":
-                # Assuming the value is already in the correct format e.g., [{'name': 'Vortex'}] or [{'id': '11004'}]
-                # We need the actual field ID for components. Let's try the common one, but this might need adjustment.
-                # If 'Components' field ID is known, use it directly. Otherwise, try a common default or log a warning.
-                component_field_id = field_ids.get(
-                    "Components", field_ids.get("components")
-                )  # Try both cases
-                if component_field_id:
-                    fields[component_field_id] = value
+            normalized_key = key.lower()
+            api_field_id = None
+
+            # 1. Check if key is a known field name in the map
+            if normalized_key in field_map:
+                api_field_id = field_map[normalized_key]
+                logger.debug(
+                    f"Identified field '{key}' as '{api_field_id}' via name map."
+                )
+
+            # 2. Check if key is a direct custom field ID
+            elif key.startswith("customfield_"):
+                api_field_id = key
+                logger.debug(f"Identified field '{key}' as direct custom field ID.")
+
+            # 3. Check if key is a standard system field ID (like 'summary', 'priority')
+            elif key in field_map:  # Check original case for system fields
+                api_field_id = field_map[key]
+                logger.debug(f"Identified field '{key}' as standard system field ID.")
+
+            if api_field_id:
+                # Get the full field definition for formatting context if needed
+                field_definition = self.get_field_by_id(
+                    api_field_id
+                )  # From FieldsMixin
+                formatted_value = self._format_field_value_for_write(
+                    api_field_id, value, field_definition
+                )
+                if formatted_value is not None:  # Only add if formatting didn't fail
+                    fields[api_field_id] = formatted_value
                     logger.debug(
-                        f"Explicitly added components using field ID: {component_field_id}"
+                        f"Added field '{api_field_id}' from kwarg '{key}': {formatted_value}"
                     )
                 else:
-                    # Fallback or warning if component ID not found
                     logger.warning(
-                        "Could not find field ID for 'Components'. Components may not be set."
+                        f"Skipping field '{key}' due to formatting error or invalid value."
                     )
-                continue  # Skip further processing for components
+            else:
+                # 4. Unrecognized key - log a warning and skip
+                logger.warning(
+                    f"Ignoring unrecognized field '{key}' passed via kwargs."
+                )
 
-            if key in ("epic_name", "epic_link", "parent"):
-                continue  # Handled separately
+    def _format_field_value_for_write(
+        self, field_id: str, value: Any, field_definition: dict | None
+    ) -> Any:
+        """Formats field values for the Jira API."""
+        # Get schema type if definition is available
+        schema_type = (
+            field_definition.get("schema", {}).get("type") if field_definition else None
+        )
+        # Prefer name from definition if available, else use ID for logging/lookup
+        field_name_for_format = (
+            field_definition.get("name", field_id) if field_definition else field_id
+        )
 
-            # Check if this is a known field
-            # Use case-insensitive check for field names if needed, but rely on field_ids map primarily
-            if key in field_ids:
-                fields[field_ids[key]] = value
-            elif key.startswith("customfield_"):
-                # Direct custom field reference
-                fields[key] = value
+        # Example formatting rules based on standard field names (use lowercase for comparison)
+        normalized_name = field_name_for_format.lower()
+
+        if normalized_name == "priority":
+            if isinstance(value, str):
+                return {"name": value}
+            elif isinstance(value, dict) and ("name" in value or "id" in value):
+                return value  # Assume pre-formatted
+            else:
+                logger.warning(
+                    f"Invalid format for priority field: {value}. Expected string name or dict."
+                )
+                return None  # Or raise error
+        elif normalized_name == "labels":
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                return value
+            # Allow comma-separated string if passed via additional_fields JSON string
+            elif isinstance(value, str):
+                return [label.strip() for label in value.split(",") if label.strip()]
+            else:
+                logger.warning(
+                    f"Invalid format for labels field: {value}. Expected list of strings or comma-separated string."
+                )
+                return None
+        elif normalized_name in ["fixversions", "versions", "components"]:
+            # These expect lists of objects, typically {"name": "..."} or {"id": "..."}
+            if isinstance(value, list):
+                formatted_list = []
+                for item in value:
+                    if isinstance(item, str):
+                        formatted_list.append({"name": item})  # Convert simple strings
+                    elif isinstance(item, dict) and ("name" in item or "id" in item):
+                        formatted_list.append(item)  # Keep pre-formatted dicts
+                    else:
+                        logger.warning(
+                            f"Invalid item format in {normalized_name} list: {item}"
+                        )
+                return formatted_list
+            else:
+                logger.warning(
+                    f"Invalid format for {normalized_name} field: {value}. Expected list."
+                )
+                return None
+        elif normalized_name == "reporter":
+            if isinstance(value, str):
+                try:
+                    reporter_identifier = self._get_account_id(value)
+                    if self.config.is_cloud:
+                        return {"accountId": reporter_identifier}
+                    else:
+                        return {"name": reporter_identifier}
+                except ValueError as e:
+                    logger.warning(f"Could not format reporter field: {str(e)}")
+                    return None
+            elif isinstance(value, dict) and ("name" in value or "accountId" in value):
+                return value  # Assume pre-formatted
+            else:
+                logger.warning(f"Invalid format for reporter field: {value}")
+                return None
+        # Add more formatting rules for other standard fields based on schema_type or field_id
+        elif normalized_name == "duedate":
+            if isinstance(value, str):  # Basic check, could add date validation
+                return value
+            else:
+                logger.warning(
+                    f"Invalid format for duedate field: {value}. Expected YYYY-MM-DD string."
+                )
+                return None
+        elif schema_type == "datetime" and isinstance(value, str):
+            # Example: Ensure datetime fields are in ISO format if needed by API
+            try:
+                dt = parse_date(value)  # Assuming parse_date handles various inputs
+                return (
+                    dt.isoformat() if dt else value
+                )  # Return ISO or original if parse fails
+            except Exception:
+                logger.warning(
+                    f"Could not parse datetime for field {field_id}: {value}"
+                )
+                return value  # Return original on error
+
+        # Default: return value as is if no specific formatting needed/identified
+        return value
 
     def _handle_create_issue_error(self, exception: Exception, issue_type: str) -> None:
         """
@@ -764,11 +905,7 @@ class IssuesMixin(UsersMixin):
 
                 elif key == "attachments":
                     # Handle attachments separately - they're not part of fields update
-                    if (
-                        value
-                        and isinstance(value, list | tuple)
-                        and hasattr(self, "upload_attachments")
-                    ):
+                    if value and isinstance(value, list | tuple):
                         # We'll process attachments after updating fields
                         pass
                     else:
@@ -782,14 +919,10 @@ class IssuesMixin(UsersMixin):
                     except ValueError as e:
                         logger.warning(f"Could not update assignee: {str(e)}")
                 else:
-                    # Process regular fields
-                    field_ids = self.get_jira_field_ids()
-                    if key in field_ids:
-                        update_fields[field_ids[key]] = value
-                    elif key.startswith("customfield_"):
-                        update_fields[key] = value
-                    else:
-                        update_fields[key] = value
+                    # Process regular fields using _process_additional_fields
+                    # Create a temporary dict with just this field
+                    field_kwargs = {key: value}
+                    self._process_additional_fields(update_fields, field_kwargs)
 
             # Update the issue fields
             if update_fields:
@@ -798,11 +931,7 @@ class IssuesMixin(UsersMixin):
                 )
 
             # Handle attachments if provided
-            if (
-                "attachments" in kwargs
-                and kwargs["attachments"]
-                and hasattr(self, "upload_attachments")
-            ):
+            if "attachments" in kwargs and kwargs["attachments"]:
                 try:
                     attachments_result = self.upload_attachments(
                         issue_key, kwargs["attachments"]
@@ -818,6 +947,10 @@ class IssuesMixin(UsersMixin):
 
             # Get the updated issue data and convert to JiraIssue model
             issue_data = self.jira.get_issue(issue_key)
+            if not isinstance(issue_data, dict):
+                msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+                logger.error(msg)
+                raise TypeError(msg)
             issue = JiraIssue.from_api_response(issue_data)
 
             # Add attachment results to the response if available
@@ -857,6 +990,10 @@ class IssuesMixin(UsersMixin):
         # If no status change is requested, return the issue
         if not status:
             issue_data = self.jira.get_issue(issue_key)
+            if not isinstance(issue_data, dict):
+                msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+                logger.error(msg)
+                raise TypeError(msg)
             return JiraIssue.from_api_response(issue_data)
 
         # Get available transitions
@@ -954,6 +1091,10 @@ class IssuesMixin(UsersMixin):
 
         # Get the updated issue data
         issue_data = self.jira.get_issue(issue_key)
+        if not isinstance(issue_data, dict):
+            msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+            logger.error(msg)
+            raise TypeError(msg)
         return JiraIssue.from_api_response(issue_data)
 
     def delete_issue(self, issue_key: str) -> bool:
@@ -973,71 +1114,9 @@ class IssuesMixin(UsersMixin):
             self.jira.delete_issue(issue_key)
             return True
         except Exception as e:
-            logger.error(f"Error deleting issue {issue_key}: {str(e)}")
-            raise Exception(f"Error deleting issue {issue_key}: {str(e)}") from e
-
-    def get_jira_field_ids(self) -> dict[str, str]:
-        """
-        Get mappings of field names to IDs.
-
-        Returns:
-            Dictionary mapping field names to their IDs
-        """
-        # Use cached field IDs if available
-        if hasattr(self, "_field_ids_cache") and self._field_ids_cache:
-            return self._field_ids_cache
-
-        # Get cached field IDs or fetch from server
-        return self._get_cached_field_ids()
-
-    def _get_cached_field_ids(self) -> dict[str, str]:
-        """
-        Get cached field IDs or fetch from server.
-
-        Returns:
-            Dictionary mapping field names to their IDs
-        """
-        # Initialize cache if needed
-        if not hasattr(self, "_field_ids_cache"):
-            self._field_ids_cache = {}
-
-        # Return cache if not empty
-        if self._field_ids_cache:
-            return self._field_ids_cache
-
-        # Fetch field IDs from server
-        try:
-            # Check if get_all_fields method exists before calling it
-            if not hasattr(self.jira, "get_all_fields"):
-                logger.warning("Jira object does not have 'get_all_fields' method")
-                return {}
-
-            fields = self.jira.get_all_fields()
-            field_ids = {}
-
-            for field in fields:
-                name = field.get("name")
-                field_id = field.get("id")
-                if name and field_id:
-                    field_ids[name] = field_id
-
-            # Log available fields to help with debugging
-            self._log_available_fields(fields)
-
-            # Try to discover EPIC field IDs
-            for field in fields:
-                self._process_field_for_epic_data(field, field_ids)
-
-            # Call the method from EpicsMixin through inheritance
-            self._try_discover_fields_from_existing_epic(field_ids)
-
-            # Cache the results
-            self._field_ids_cache = field_ids
-            return field_ids
-
-        except Exception as e:
-            logger.warning(f"Error getting field IDs: {str(e)}")
-            return {}
+            msg = f"Error deleting issue {issue_key}: {str(e)}"
+            logger.error(msg)
+            raise Exception(msg) from e
 
     def _log_available_fields(self, fields: list[dict]) -> None:
         """
@@ -1084,70 +1163,6 @@ class IssuesMixin(UsersMixin):
         except Exception as e:
             logger.warning(f"Error processing field for epic data: {str(e)}")
 
-    def _try_discover_fields_from_existing_epic(
-        self, field_ids: dict[str, str]
-    ) -> None:
-        """
-        Try to discover epic fields by analyzing existing epics and linked issues.
-
-        Args:
-            field_ids: Dictionary of field IDs to update
-        """
-        try:
-            # Try to find an epic using JQL search
-            jql = "issuetype = Epic ORDER BY created DESC"
-            try:
-                results = self.jira.jql(jql, limit=1)
-            except AttributeError:
-                # If jql method doesn't exist, try another approach or skip
-                logger.debug("JQL method not available on this Jira instance")
-                return
-
-            if not results or not results.get("issues"):
-                return
-
-            # Get the first epic
-            epic = results["issues"][0]
-            epic_key = epic.get("key")
-
-            if not epic_key:
-                return
-
-            # Try to find issues linked to this epic using JQL
-            linked_jql = f'issue in linkedIssues("{epic_key}") ORDER BY created DESC'
-            try:
-                results = self.jira.jql(linked_jql, limit=10)
-            except Exception as e:
-                logger.debug(f"Error querying linked issues: {str(e)}")
-                return
-
-            if not results or not results.get("issues"):
-                return
-
-            # Check issues for potential epic link fields
-            issues = results.get("issues", [])
-
-            for issue in issues:
-                fields = issue.get("fields", {})
-                if not fields or not isinstance(fields, dict):
-                    continue
-
-                # Check each field for a potential epic link
-                for field_id, value in fields.items():
-                    if (
-                        field_id.startswith("customfield_")
-                        and value
-                        and isinstance(value, str)
-                    ):
-                        # If it looks like a key (e.g., PRJ-123), it might be an epic link
-                        if "-" in value and any(c.isdigit() for c in value):
-                            field_ids["Epic Link"] = field_id
-                            break
-
-        except Exception as e:
-            logger.debug(f"Error discovering epic fields: {str(e)}")
-            # Continue with existing field_ids
-
     def get_available_transitions(self, issue_key: str) -> list[dict]:
         """
         Get all available transitions for an issue.
@@ -1162,9 +1177,7 @@ class IssuesMixin(UsersMixin):
             Exception: If there is an error getting transitions
         """
         try:
-            transitions = self.jira.issue_get_transitions(issue_key)  # type: ignore[attr-defined]
-            if isinstance(transitions, dict) and "transitions" in transitions:
-                return transitions["transitions"]
+            transitions = self.jira.get_issue_transitions(issue_key)
             return transitions
         except Exception as e:
             logger.error(f"Error getting transitions for issue {issue_key}: {str(e)}")
@@ -1275,7 +1288,7 @@ class IssuesMixin(UsersMixin):
                             ]
 
                 # Add any remaining custom fields
-                self._add_custom_fields(fields, issue_data)
+                self._process_additional_fields(fields, issue_data)
 
                 if validate_only:
                     # For validation, just log the issue that would be created
@@ -1298,6 +1311,10 @@ class IssuesMixin(UsersMixin):
         try:
             # Call Jira's bulk create endpoint
             response = self.jira.create_issues(issue_updates)
+            if not isinstance(response, dict):
+                msg = f"Unexpected return value type from `jira.create_issues`: {type(response)}"
+                logger.error(msg)
+                raise TypeError(msg)
 
             # Process results
             created_issues = []
@@ -1307,6 +1324,11 @@ class IssuesMixin(UsersMixin):
                     try:
                         # Fetch the full issue data
                         issue_data = self.jira.get_issue(issue_key)
+                        if not isinstance(issue_data, dict):
+                            msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+                            logger.error(msg)
+                            raise TypeError(msg)
+
                         created_issues.append(
                             JiraIssue.from_api_response(
                                 issue_data,
@@ -1331,3 +1353,57 @@ class IssuesMixin(UsersMixin):
         except Exception as e:
             logger.error(f"Error in bulk issue creation: {str(e)}")
             raise
+
+    def batch_get_changelogs(
+        self, issue_ids_or_keys: list[str], fields: list[str] | None = None
+    ) -> list[JiraIssue]:
+        """
+        Get changelogs for multiple issues in a batch. Repeatly fetch data if necessary.
+
+        Warning:
+            This function is only avaiable on Jira Cloud.
+
+        Args:
+            issue_ids_or_keys: List of issue IDs or keys
+            fields: Filter the changelogs by fields, e.g. ['status', 'assignee']. Default to None for all fields.
+
+        Returns:
+            List of JiraIssue objects that only contain changelogs and id
+        """
+
+        if not self.config.is_cloud:
+            error_msg = "Batch get issue changelogs is only available on Jira Cloud."
+            logger.error(error_msg)
+            raise NotImplementedError(error_msg)
+
+        # Get paged api results
+        paged_api_results = self.get_paged(
+            method="post",
+            url=self.jira.resource_url("changelog/bulkfetch"),
+            params_or_json={
+                "fieldIds": fields,
+                "issueIdsOrKeys": issue_ids_or_keys,
+            },
+        )
+
+        # Save (issue_id, changelogs)
+        issue_changelog_results: defaultdict[str, list[JiraChangelog]] = defaultdict(
+            list
+        )
+
+        for api_result in paged_api_results:
+            for data in api_result.get("issueChangeLogs", []):
+                issue_id = data.get("issueId", "")
+                changelogs = [
+                    JiraChangelog.from_api_response(changelog_data)
+                    for changelog_data in data.get("changeHistories", [])
+                ]
+
+                issue_changelog_results[issue_id].extend(changelogs)
+
+        issues = [
+            JiraIssue(id=issue_id, changelogs=changelogs)
+            for issue_id, changelogs in issue_changelog_results.items()
+        ]
+
+        return issues
